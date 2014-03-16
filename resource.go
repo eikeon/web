@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path"
@@ -15,37 +14,34 @@ import (
 
 var Root *string
 
+type Site interface {
+	Host() string
+	Routes() []*Route
+	GetResource(name string, route *Route, vars Vars) Resource
+}
+
 type Resource interface{}
 
 type Vars map[string]string
 
-type Getters map[string]Getter
-type Getter func(route *Route, vars Vars) Resource
-
 type Route struct {
-	Path   string
-	Name   string
-	Data   map[string]string
-	getter Getter
+	Path string
+	Name string
+	Data map[string]string
+	site Site
+}
+
+func (r *Route) Site() Site {
+	return r.site
 }
 
 func (r *Route) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	t := getTemplate(r.Name)
-	res := r.getter(r, mux.Vars(req))
+	res := r.site.GetResource(r.Name, r, mux.Vars(req))
 	if res == nil {
 		w.WriteHeader(http.StatusNotFound)
 	}
 	writeTemplate(t, res, w)
-}
-
-func NotFound(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusNotFound)
-	t := getTemplate("404")
-	writeTemplate(t, nil, w)
-}
-
-func NotFoundHandler() http.Handler {
-	return http.HandlerFunc(NotFound)
 }
 
 func CanonicalHost(canonical string) http.HandlerFunc {
@@ -58,41 +54,46 @@ func CanonicalHost(canonical string) http.HandlerFunc {
 	}
 }
 
-func handler(j io.Reader, host string, getters map[string]Getter) (http.Handler, error) {
+func handler(j io.Reader, site Site) (http.Handler, error) {
 	dec := json.NewDecoder(j)
-	var routes []*Route
-	if err := dec.Decode(&routes); err != nil {
+	if err := dec.Decode(site); err != nil {
 		return nil, err
 	}
 
 	router := mux.NewRouter()
 	router.StrictSlash(true)
 
+	host := site.Host()
 	if strings.HasPrefix(host, "www.") {
 		router.Host(host[4:len(host)]).HandlerFunc(CanonicalHost(host))
+	} else {
+		router.Host("www." + host).HandlerFunc(CanonicalHost(host))
 	}
 
 	s := router.Host(host).Subrouter()
 
-	for _, r := range routes {
-		if g := getters[r.Name]; g == nil {
-			log.Printf("Warning: no web.Getter for '%s'\n", r.Name)
-		} else {
-			r.getter = g
-			s.Handle(r.Path, r).Name(r.Name).Methods("GET")
-		}
+	for _, r := range site.Routes() {
+		r.site = site
+		s.Handle(r.Path, r).Name(r.Name).Methods("GET")
 	}
 
 	static := NewStaticHandler(http.Dir(path.Join(*Root, "static/")))
 	s.MatcherFunc(static.Match).Handler(static)
-	s.NewRoute().Handler(NotFoundHandler())
+	s.NewRoute().Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		t := getTemplate("404")
+		d := map[string]interface{}{"Path": r.URL.Path, "Site": site}
+		writeTemplate(t, d, w)
+	}))
+
+	router.NewRoute().MatcherFunc(static.Match).Handler(static)
 
 	return router, nil
 }
 
-func Handler(host string, getters map[string]Getter) (http.Handler, error) {
+func Handler(site Site) (http.Handler, error) {
 	if j, err := os.OpenFile(path.Join(*Root, "pages.json"), os.O_RDONLY, 0666); err == nil {
-		s, err := handler(j, host, getters)
+		s, err := handler(j, site)
 		j.Close()
 		if err == nil {
 			return s, nil

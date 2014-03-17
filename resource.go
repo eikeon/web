@@ -47,7 +47,13 @@ func (r *Route) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 func CanonicalHost(canonical string) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		if req.Host != canonical {
-			http.Redirect(w, req, req.URL.Scheme+"://"+canonical+req.URL.Path, http.StatusMovedPermanently)
+			isHTTPS := req.TLS != nil
+			scheme := "http"
+			if isHTTPS {
+				scheme = "https"
+			}
+
+			http.Redirect(w, req, scheme+"://"+canonical+req.URL.Path, http.StatusMovedPermanently)
 		} else {
 			http.Error(w, "", http.StatusInternalServerError)
 		}

@@ -12,16 +12,16 @@ type Message map[string]interface{}
 
 type Hub struct {
 	In   chan Message
-	outs []chan Message
+	outs map[chan Message]bool
 	sync.Mutex
 }
 
 func NewHub() *Hub {
-	h := &Hub{}
+	h := &Hub{outs: make(map[chan Message]bool)}
 	h.In = make(chan Message)
 	go func() {
 		for m := range h.In {
-			for _, out := range h.outs {
+			for out, _ := range h.outs {
 				select {
 				case out <- m:
 				default:
@@ -36,7 +36,13 @@ func NewHub() *Hub {
 
 func (h *Hub) Add(out chan Message) {
 	h.Lock()
-	h.outs = append(h.outs, out)
+	h.outs[out] = true
+	h.Unlock()
+}
+
+func (h *Hub) Remove(out chan Message) {
+	h.Lock()
+	delete(h.outs, out)
 	h.Unlock()
 }
 
@@ -62,6 +68,7 @@ func (h *Hub) Handler() http.Handler {
 				break
 			}
 		}
+		h.Remove(in)
 		ws.Close()
 	})
 }

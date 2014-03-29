@@ -8,7 +8,7 @@ import (
 	"code.google.com/p/go.net/websocket"
 )
 
-type Message map[string]interface{}
+type Message interface{}
 
 type Hub struct {
 	In   chan Message

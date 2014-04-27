@@ -1,47 +1,111 @@
 package web
 
 import (
-	"encoding/json"
-	"errors"
-	"io"
+	"log"
 	"net/http"
-	"os"
-	"path"
-	"strings"
-
-	"github.com/gorilla/mux"
+	"net/url"
 )
 
-var Root *string
-
-type Site interface {
-	Host() string
-	Routes() []*Route
-	GetResource(name string, route *Route, vars Vars) Resource
+type Resource struct {
+	URL         string `db:"HASH"`
+	Title       string
+	Description string
+	Photo       string
+	Name        string
+	Type        string // open graph type
+	Static      string
+	Up          string
+	Canonical   string
+	Redirect    string
+	Digest      string
+	ContentType string
+	Size        int64
 }
 
-type Resource interface{}
-
-type Vars map[string]string
-
-type Route struct {
-	Path string
-	Name string
-	Data map[string]string
-	site Site
-}
-
-func (r *Route) Site() Site {
-	return r.site
-}
-
-func (r *Route) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	t := getTemplate(r.Name)
-	res := r.site.GetResource(r.Name, r, mux.Vars(req))
-	if res == nil {
-		w.WriteHeader(http.StatusNotFound)
+func (r *Resource) Site() *Resource {
+	if u, err := url.Parse(r.URL); err == nil {
+		u = u.ResolveReference(&url.URL{Path: "/"})
+		if dr, err := Get(u.String()); err == nil {
+			return dr
+		} else {
+			return &Resource{URL: u.String(), Title: "Site Not Found"}
+		}
+	} else {
+		return nil
 	}
-	writeTemplate(t, res, w)
+}
+
+func (r *Resource) Host() string {
+	if u, err := url.Parse(r.URL); err == nil {
+		return u.Host
+	} else {
+		log.Println("URL Parse:", err)
+		return "parse_error"
+	}
+}
+
+func (r *Resource) Path() string {
+	if u, err := url.Parse(r.URL); err == nil {
+		return u.Path
+	} else {
+		log.Println("URL Parse:", err)
+		return "parse_error"
+	}
+}
+
+type ResourceHandler struct {
+	Static  bool
+	Root    http.Dir
+	Aliases map[string]string
+	GetData func(r *Resource) TemplateData `json:"-"`
+}
+
+func (rh *ResourceHandler) URL(r *http.Request) *url.URL {
+	host := r.Host
+	if alias, ok := rh.Aliases[r.Host]; ok {
+		host = alias
+	}
+	u := &url.URL{Host: host, Path: r.URL.String()}
+	return u
+}
+
+func (rh *ResourceHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if rh.Match(r) {
+		rh.ServeStatic(w, r)
+		return
+	}
+
+	url := rh.URL(r).String()
+
+	if dr, err := Get(url); err == nil {
+		if dr.Redirect != "" {
+			isHTTPS := r.TLS != nil
+			scheme := "http"
+			if isHTTPS {
+				scheme = "https"
+			}
+			http.Redirect(w, r, scheme+":"+dr.Redirect, http.StatusSeeOther)
+			return
+		}
+		if dr.Name == "404" {
+			site := dr.Site()
+			if site.Canonical != "" {
+				CanonicalHost(site.Canonical)(w, r)
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+		}
+		t := rh.getTemplate(dr)
+		d := rh.GetData(dr)
+		if t != nil {
+			writeTemplate(t, d, w)
+		} else {
+			w.Write([]byte("no template found"))
+		}
+	} else {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(err.Error()))
+	}
 }
 
 func CanonicalHost(canonical string) http.HandlerFunc {
@@ -52,61 +116,9 @@ func CanonicalHost(canonical string) http.HandlerFunc {
 			if isHTTPS {
 				scheme = "https"
 			}
-
 			http.Redirect(w, req, scheme+"://"+canonical+req.URL.Path, http.StatusMovedPermanently)
 		} else {
 			http.Error(w, "", http.StatusInternalServerError)
 		}
-	}
-}
-
-func handler(j io.Reader, site Site) (http.Handler, error) {
-	dec := json.NewDecoder(j)
-	if err := dec.Decode(site); err != nil {
-		return nil, err
-	}
-
-	router := mux.NewRouter()
-	router.StrictSlash(true)
-
-	host := site.Host()
-	if strings.HasPrefix(host, "www.") {
-		router.Host(host[4:len(host)]).HandlerFunc(CanonicalHost(host))
-	} else {
-		router.Host("www." + host).HandlerFunc(CanonicalHost(host))
-	}
-
-	s := router.Host(host).Subrouter()
-
-	for _, r := range site.Routes() {
-		r.site = site
-		s.Handle(r.Path, r).Name(r.Name).Methods("GET")
-	}
-
-	static := NewStaticHandler(http.Dir(path.Join(*Root, "static/")))
-	s.MatcherFunc(static.Match).Handler(static)
-	s.NewRoute().Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-		t := getTemplate("404")
-		d := map[string]interface{}{"Path": r.URL.Path, "Site": site}
-		writeTemplate(t, d, w)
-	}))
-
-	router.NewRoute().MatcherFunc(static.Match).Handler(static)
-
-	return router, nil
-}
-
-func Handler(site Site) (http.Handler, error) {
-	if j, err := os.OpenFile(path.Join(*Root, "pages.json"), os.O_RDONLY, 0666); err == nil {
-		s, err := handler(j, site)
-		j.Close()
-		if err == nil {
-			return s, nil
-		} else {
-			return nil, errors.New("WARNING: could not decode pages.json: " + err.Error())
-		}
-	} else {
-		return nil, errors.New("WARNING: could not open pages.json: " + err.Error())
 	}
 }
